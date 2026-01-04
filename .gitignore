@@ -1,0 +1,10 @@
+App.config
+Settings1.Designer.cs
+Settings1.settings
+bin/
+obj/
+*.config
+*.settings
+*.user
+*.suo
+*.vs/
