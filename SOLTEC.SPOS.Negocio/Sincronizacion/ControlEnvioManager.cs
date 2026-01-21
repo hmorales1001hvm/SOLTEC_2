@@ -1,4 +1,5 @@
 ﻿using Newtonsoft.Json;
+using Soltec.Common.LoggerFramework;
 using System;
 using System.Collections.Generic;
 using System.Dynamic;
@@ -134,6 +135,26 @@ namespace SOLTEC.SPOS.Negocio.Sincronizacion
         /// <summary>
         /// Cargar archivo JSON
         /// </summary>
+        //public ControlEnvio Cargar()
+        //{
+        //    lock (GetLockObject())
+        //    {
+        //        if (!File.Exists(_path))
+        //        {
+        //            var nuevo = new ControlEnvio();
+        //            Guardar(nuevo);
+        //            return nuevo;
+        //        }
+
+        //        using (var stream = new FileStream(_path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+        //        using (var reader = new StreamReader(stream))
+        //        {
+        //            var json = reader.ReadToEnd();
+        //            return JsonConvert.DeserializeObject<ControlEnvio>(json) ?? new ControlEnvio();
+        //        }
+        //    }
+        //}
+
         public ControlEnvio Cargar()
         {
             lock (GetLockObject())
@@ -145,14 +166,55 @@ namespace SOLTEC.SPOS.Negocio.Sincronizacion
                     return nuevo;
                 }
 
-                using (var stream = new FileStream(_path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
-                using (var reader = new StreamReader(stream))
+                try
                 {
-                    var json = reader.ReadToEnd();
-                    return JsonConvert.DeserializeObject<ControlEnvio>(json) ?? new ControlEnvio();
+                    using (var stream = new FileStream(_path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                    using (var reader = new StreamReader(stream))
+                    {
+                        var json = reader.ReadToEnd();
+                        return JsonConvert.DeserializeObject<ControlEnvio>(json) ?? new ControlEnvio();
+                    }
+                }
+                catch (JsonReaderException ex)
+                {
+                    Logger.Error($"control_envio.json corrupto (DELIMITER). Se eliminará. Error: {ex.Message}");
+
+                    RespaldarYEliminar();
+                    return new ControlEnvio();
+                }
+                catch (Exception ex)
+                {
+                    Logger.Error($"Error inesperado leyendo control_envio.json. Se eliminará. Error: {ex.Message}");
+
+                    RespaldarYEliminar();
+                    return new ControlEnvio();
                 }
             }
         }
+
+        private void RespaldarYEliminar()
+        {
+            try
+            {
+                string backup = _path + ".corrupt_" + DateTime.Now.ToString("yyyyMMddHHmmss");
+                File.Move(_path, backup);
+                Logger.Warning($"control_envio.json respaldado como {backup}");
+            }
+            catch
+            {
+                try
+                {
+                    File.Delete(_path);
+                    Logger.Warning("control_envio.json eliminado sin respaldo.");
+                }
+                catch (Exception ex)
+                {
+                    Logger.Error($"No se pudo eliminar control_envio.json: {ex.Message}");
+                }
+            }
+        }
+
+
 
         /// <summary>
         /// Guardar JSON en disco

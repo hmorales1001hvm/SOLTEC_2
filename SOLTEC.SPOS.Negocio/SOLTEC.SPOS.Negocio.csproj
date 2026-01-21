@@ -84,6 +84,7 @@
     <Compile Include="Comun\ProcessHandler.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
     <Compile Include="Sincronizacion\ControlEnvioManager.cs" />
+    <Compile Include="Sincronizacion\ControlOnDemandManager.cs" />
     <Compile Include="Sincronizacion\Sincronizador.cs" />
   </ItemGroup>
   <ItemGroup>

@@ -14,6 +14,7 @@ using System.IO;
 using System.IO.Compression;
 using System.IO.Ports;
 using System.Linq;
+using System.Net;
 using System.Net.Http;
 using System.Text;
 using System.Threading.Tasks;
@@ -24,7 +25,7 @@ namespace SOLTEC.SPOS.Negocio.Sincronizacion
 
     public class Sincronizador
     {
-        private string Sucursal = string.Empty;
+        private static string Sucursal = string.Empty;
         private string RutaSucursalObtenida { get; set; }
         public string Urls { get; set; }
         public string RutaActualizador { get; set; }
@@ -149,8 +150,7 @@ namespace SOLTEC.SPOS.Negocio.Sincronizacion
                                                         { "VentasImpuestos", new[] { "Id_Venta", "FechaOperacion", "Impuesto", "TipoFactor" } },
                                                         { "VentasImpuestosDetalle", new[] { "Id_Venta", "FechaOperacion", "Id_Producto", "Impuesto" } },
                                                         { "VentasProductos", new[] { "Id_Venta", "Codigo", "FechaOperacion", "Descuento", "Cantidad", "DescuentoPorciento", "TipoOperacion", "IVA_Importe" } },
-                                                        { "VentasVendedorCuotas", new[] { "Fecha", "IdVendedor", "ImporteVenta", "PorcVenta", "ImporteNaturistas", "PorcNaturistas", "MontoDescuento" } }//,
-                                                        //{ "soltec2_enlinea_ventas", new[] { "fechaOperacion" } }
+                                                        { "VentasVendedorCuotas", new[] { "Fecha", "IdVendedor", "ImporteVenta", "PorcVenta", "ImporteNaturistas", "PorcNaturistas", "MontoDescuento" } }
                                                     };
 
                 // Procesamiento de tu script SQL original
@@ -209,6 +209,27 @@ namespace SOLTEC.SPOS.Negocio.Sincronizacion
                             return; 
                         }
                     }
+                    else if (script.TipoCarga == "ONDEMAND")
+                    {
+                        horaInicial = script.fechaInicial;
+                        horaFinal = script.fechaFinal;
+
+                        sqlScript = sqlScript.Replace("Param1", script.fechaInicial)
+                                             .Replace("Param2", script.fechaFinal);
+
+                        var hi = TimeSpan.Parse(horaInicial);
+                        var hf = TimeSpan.Parse(horaFinal);
+
+                        Logger.Info($"Validando rango {hi} - {hf} para ONDEMAND...");
+                        bool puedeEjecutar = await PuedeEjecutarOnDemandAsync(hi, hf);
+
+                        if (!puedeEjecutar)
+                        {
+                            Logger.Warning("ONDEMAND no ejecutado: fuera de horario o ya ejecutado hoy.");
+                            return;
+                        }
+                    }
+
                 }
 
                 // Ejecutar SQL
@@ -262,9 +283,19 @@ namespace SOLTEC.SPOS.Negocio.Sincronizacion
                         return;
                     }
                 }
+                else if (script.TipoCarga == "ONDEMAND")
+                {
+                    withData = data.Any(t => t.Value is IEnumerable<dynamic> list && list.Any());
+
+                    if (!withData)
+                    {
+                        Logger.Warning("ONDEMAND no contiene datos para enviar. No se ejecutará.");
+                        return;
+                    }
+                }
 
 
-                
+
                 var jsonString = Newtonsoft.Json.JsonConvert.SerializeObject(data);
 
                 
@@ -322,6 +353,24 @@ namespace SOLTEC.SPOS.Negocio.Sincronizacion
                         }
                     }
                 }
+                else if (script.TipoCarga == "ONDEMAND")
+                {
+                    var zipBytes = ComprimirJsonYInfoEnZip(jsonString, script, withData, script.ConTransmisionInicial, Sucursal);
+                    var response = await SincronizaScriptZipAsync(zipBytes, script, withData, script.ConTransmisionInicial);
+                    if (response.Success)
+                    {
+                        var controlOnDemand = new ControlOnDemandManager(
+                            @"C:\Sfspos\Orquestador\SOLTEC.SPOS.Monitor\control_ondemand.json");
+
+                        controlOnDemand.RegistrarEjecucion();
+
+                        Logger.Info($"ONDEMAND: El proceso {script.Nombre} se ejecutó correctamente y se envió ZIP: {Sucursal}");
+                    }
+                    else
+                    {
+                        Logger.Warning($"ONDEMAND: El proceso {script.Nombre} no se ejecutó.");
+                    }
+                }
             }
             catch (Exception ex)
             {
@@ -372,6 +421,26 @@ namespace SOLTEC.SPOS.Negocio.Sincronizacion
 
                 return memoriaZip.ToArray(); // ZIP listo para enviar
             }
+        }
+
+
+        private async Task<bool> PuedeEjecutarOnDemandAsync(TimeSpan hi, TimeSpan hf)
+        {
+            var ahora = DateTime.Now.TimeOfDay;
+
+            if (ahora < hi || ahora > hf)
+                return false;
+
+            var path = @"C:\Sfspos\Orquestador\SOLTEC.SPOS.Monitor\control_ondemand.json";
+            var control = new ControlOnDemandManager(path);
+
+            if (control.YaEjecutadoHoy())
+            {
+                Logger.Info("ONDEMAND ya fue ejecutado hoy. Esperando al siguiente día.");
+                return false;
+            }
+
+            return true;
         }
 
 
@@ -643,9 +712,97 @@ namespace SOLTEC.SPOS.Negocio.Sincronizacion
 
 
 
+        //public async Task<ApiResponse> ActualizaSucursalTransmisionAsync(SPOS_SQLScripts script)
+        //{
+        //    var apiResponse = new ApiResponse { Success = false };
+        //    try
+        //    {
+        //        var url = await ObtieneUrlActiva();
+        //        if (string.IsNullOrEmpty(url))
+        //        {
+        //            TranmisionInicialExitosa = false;
+        //            Logger.Warning("No se encontraron servicios disponibles.");
+        //            return apiResponse;
+        //        }
+
+        //        var apiUrl = $"{url}/venta/ActualizaSucursalTransmision";
+
+        //        var ventaEnLinea = new ProcesosOnLine
+        //        {
+        //            Sucursal = Sucursal,
+        //            Json = "{}",
+        //            NombreProceso = script.Nombre,
+        //            IdSucursal = script.IdSucursal,
+        //            Ver1 = "", 
+        //            Ver2 = "", 
+        //            Ver3 = "", 
+        //            Ver4 = "SV",
+        //            Ver5 = "SV",
+        //            Ver6 = "SV",
+        //            ConDatos = false,
+        //            MultiFra = script.MultiFra,
+        //            DatabaseName = script.DatabaseName,
+        //            HostName = script.HostName,
+        //            Password = script.Password,
+        //            UserName = script.UserName,
+        //            ConTransmisionInicial = false,
+        //            TicketsFaltantes = System.DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff"),
+        //            TipoCarga = script.TipoCarga
+        //        };
+
+        //        using (var client = new HttpClient())
+        //        {
+        //            client.Timeout = TimeSpan.FromMinutes(30);
+
+        //            var content = new StringContent(
+        //                JsonConvert.SerializeObject(ventaEnLinea),
+        //                Encoding.UTF8,
+        //                "application/json"
+        //            );
+
+        //            HttpResponseMessage response = await client.PostAsync(apiUrl, content);
+        //            string jsonResult = await response.Content.ReadAsStringAsync();
+
+        //            Logger.Info($"Respuesta bruta del API: {jsonResult}");
+
+        //            ApiResponse apiResult = null;
+
+        //            try
+        //            {
+        //                apiResult = JsonConvert.DeserializeObject<ApiResponse>(jsonResult);
+        //            }
+        //            catch (Exception ex)
+        //            {
+        //                Logger.Error($"Error parseando respuesta JSON: {ex.Message}");
+        //            }
+
+        //            // Si la API mandó una respuesta válida
+        //            if (apiResult != null)
+        //            {
+        //                TranmisionInicialExitosa = apiResult.Success;
+        //                return apiResult;
+        //            }
+
+        //            // Si hubo HTTP 500, 503, 400, timeouts o respuesta vacía
+        //            TranmisionInicialExitosa = false;
+        //            apiResponse.Success = false;
+        //            apiResponse.Message = $"Fallo en la API o respuesta inválida. HTTP={response.StatusCode}";
+        //            return apiResponse;
+        //        }
+        //    }
+        //    catch (Exception ex)
+        //    {
+        //        Logger.Error($"Error en ActualizaSucursalTransmision({script.Nombre}): {ex.Message}");
+        //        apiResponse.Success = false;
+        //        return apiResponse;
+        //    }
+        //}
+
+
         public async Task<ApiResponse> ActualizaSucursalTransmisionAsync(SPOS_SQLScripts script)
         {
             var apiResponse = new ApiResponse { Success = false };
+
             try
             {
                 var url = await ObtieneUrlActiva();
@@ -660,13 +817,13 @@ namespace SOLTEC.SPOS.Negocio.Sincronizacion
 
                 var ventaEnLinea = new ProcesosOnLine
                 {
-                    Sucursal = Sucursal,
+                    Sucursal = Sucursal, 
                     Json = "{}",
                     NombreProceso = script.Nombre,
                     IdSucursal = script.IdSucursal,
-                    Ver1 = "", //await ObtieneNumeroDeVersion("C:\\Sfspos\\Orquestador\\SOLTEC.SPOS.Orquestador\\SOLTEC.SPOS.Orquestador.exe"),
-                    Ver2 = "", //await ObtieneNumeroDeVersion("C:\\Sfspos\\Orquestador\\SOLTEC.SPOS.Monitor\\SOLTEC.SPOS.Monitor.exe"),
-                    Ver3 = "", //await ObtieneNumeroDeVersion("C:\\Sfspos\\Orquestador\\SOLTEC.SPOS.ServicioMonitor\\SOLTEC.SPOS.ServicioMonitor.exe"),
+                    Ver1 = "",
+                    Ver2 = "",
+                    Ver3 = "",
                     Ver4 = "SV",
                     Ver5 = "SV",
                     Ver6 = "SV",
@@ -677,13 +834,15 @@ namespace SOLTEC.SPOS.Negocio.Sincronizacion
                     Password = script.Password,
                     UserName = script.UserName,
                     ConTransmisionInicial = false,
-                    TicketsFaltantes = System.DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff"),
+                    TicketsFaltantes = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff"),
                     TipoCarga = script.TipoCarga
                 };
 
-                using (var client = new HttpClient())
+                using (var client = new HttpClient { Timeout = TimeSpan.FromMinutes(30) })
                 {
-                    client.Timeout = TimeSpan.FromMinutes(30);
+                    // AGREGAMOS HEADER
+                    client.DefaultRequestHeaders.Clear();
+                    client.DefaultRequestHeaders.Add("Sucursal", Sucursal);
 
                     var content = new StringContent(
                         JsonConvert.SerializeObject(ventaEnLinea),
@@ -692,42 +851,58 @@ namespace SOLTEC.SPOS.Negocio.Sincronizacion
                     );
 
                     HttpResponseMessage response = await client.PostAsync(apiUrl, content);
+
+                    if (!response.IsSuccessStatusCode)
+                    {
+                        Logger.Error($"HTTP error {response.StatusCode} al llamar a ActualizaSucursalTransmision: {script.Nombre}");
+                        apiResponse.Message = $"Fallo en la API: HTTP {response.StatusCode}";
+                        return apiResponse;
+                    }
+
                     string jsonResult = await response.Content.ReadAsStringAsync();
-
                     Logger.Info($"Respuesta bruta del API: {jsonResult}");
-
-                    ApiResponse apiResult = null;
 
                     try
                     {
-                        apiResult = JsonConvert.DeserializeObject<ApiResponse>(jsonResult);
+                        var apiResult = JsonConvert.DeserializeObject<ApiResponse>(jsonResult);
+                        if (apiResult != null)
+                        {
+                            TranmisionInicialExitosa = apiResult.Success;
+                            return apiResult;
+                        }
+                        else
+                        {
+                            Logger.Warning("Respuesta JSON inválida o vacía.");
+                        }
                     }
-                    catch (Exception ex)
+                    catch (JsonException ex)
                     {
                         Logger.Error($"Error parseando respuesta JSON: {ex.Message}");
                     }
 
-                    // Si la API mandó una respuesta válida
-                    if (apiResult != null)
-                    {
-                        TranmisionInicialExitosa = apiResult.Success;
-                        return apiResult;
-                    }
-
-                    // Si hubo HTTP 500, 503, 400, timeouts o respuesta vacía
+                    // Fallback si no se pudo parsear JSON
                     TranmisionInicialExitosa = false;
-                    apiResponse.Success = false;
-                    apiResponse.Message = $"Fallo en la API o respuesta inválida. HTTP={response.StatusCode}";
+                    apiResponse.Message = "Fallo en la API o respuesta inválida.";
                     return apiResponse;
                 }
+
+            }
+            catch (TaskCanceledException tex) when (!tex.CancellationToken.IsCancellationRequested)
+            {
+                Logger.Error($"Timeout en ActualizaSucursalTransmision({script.Nombre}): {tex.Message}");
+                apiResponse.Message = "Timeout al comunicarse con la API.";
+                TranmisionInicialExitosa = false;
+                return apiResponse;
             }
             catch (Exception ex)
             {
                 Logger.Error($"Error en ActualizaSucursalTransmision({script.Nombre}): {ex.Message}");
-                apiResponse.Success = false;
+                TranmisionInicialExitosa = false;
                 return apiResponse;
             }
         }
+
+
 
 
         /// <summary>
@@ -825,11 +1000,7 @@ namespace SOLTEC.SPOS.Negocio.Sincronizacion
         }
 
 
-        public async Task<ApiResponse> SincronizaScriptZipAsync(
-            byte[] zipFile,
-            SPOS_SQLScripts script,
-            bool conDatos,
-            bool conTransmisionInicial)
+        public async Task<ApiResponse> SincronizaScriptZipAsync(byte[] zipFile,  SPOS_SQLScripts script, bool conDatos, bool conTransmisionInicial)
         {
             var apiResponse = new ApiResponse { Success = false };
 
@@ -841,7 +1012,7 @@ namespace SOLTEC.SPOS.Negocio.Sincronizacion
                     Logger.Warning("No se encontraron servicios disponibles para HISTORICO.");
                     return apiResponse;
                 }
-
+                
                 var apiUrl = $"{url}/venta/SincronizaScriptZipAsync";
 
                 using (var client = new HttpClient())
@@ -854,7 +1025,10 @@ namespace SOLTEC.SPOS.Negocio.Sincronizacion
                     // Archivo ZIP
                     var fileContent = new ByteArrayContent(zipFile);
                     fileContent.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/zip");
-                    content.Add(fileContent, "file", $"{Sucursal}_DatosHistoricos.zip");
+                    if (script.TipoCarga== "HISTORICO")
+                        content.Add(fileContent, "file", $"{Sucursal}_DatosHistoricos.zip");
+                    else if (script.TipoCarga == "ONDEMAND")
+                        content.Add(fileContent, "file", $"{Sucursal}_DatosOnDemand.zip");
 
                     // Agregar Sucursal como parámetro
                     content.Add(new StringContent(Sucursal ?? ""), "Sucursal");
@@ -885,7 +1059,7 @@ namespace SOLTEC.SPOS.Negocio.Sincronizacion
             }
             catch (Exception ex)
             {
-                Logger.Error($"Error en SincronizaScriptZipAsync({script.Nombre}): {ex.Message}");
+                Logger.Error($"Error en SincronizaScriptZipAsync({script.Nombre} - {script.TipoCarga}): {ex.Message}");
                 apiResponse.Success = false;
                 return apiResponse;
             }
@@ -943,34 +1117,75 @@ namespace SOLTEC.SPOS.Negocio.Sincronizacion
         /// </summary>
         /// <param name="url"></param>
         /// <returns></returns>
+        //public static async Task<ApiResponse> ApiEnLinea(string url)
+        //{
+        //    var apiUrl = $"{url}/transmision/isOnline";
+
+        //    var apiResponse = new ApiResponse();
+        //    HttpResponseMessage response;
+
+        //    using (var client = new HttpClient())
+        //    {
+        //        client.DefaultRequestHeaders.Clear();
+        //        response = client.GetAsync(apiUrl).Result;
+        //        response.EnsureSuccessStatusCode();
+        //        if ((int)response.StatusCode == 503 || (int)response.StatusCode == 401)
+        //        {
+        //            apiResponse.Success = false;
+        //            apiResponse.Message = response.ReasonPhrase;
+
+        //            return apiResponse;
+        //        }
+
+        //        apiResponse = JsonConvert.DeserializeObject<ApiResponse>(await response.Content.ReadAsStringAsync().ConfigureAwait(false));
+        //    }
+
+        //    if (!response.IsSuccessStatusCode)
+        //        Logger.Error($"No se pudo procesar: IsOnline\n{response.StatusCode}");
+
+        //    return apiResponse;
+        //}
+
         public static async Task<ApiResponse> ApiEnLinea(string url)
         {
             var apiUrl = $"{url}/transmision/isOnline";
-
             var apiResponse = new ApiResponse();
-            HttpResponseMessage response;
 
-            using (var client = new HttpClient())
+            try
             {
-                client.DefaultRequestHeaders.Clear();
-                response = client.GetAsync(apiUrl).Result;
-                response.EnsureSuccessStatusCode();
-                if ((int)response.StatusCode == 503 || (int)response.StatusCode == 401)
+                using (var client = new HttpClient())
                 {
-                    apiResponse.Success = false;
-                    apiResponse.Message = response.ReasonPhrase;
+                    client.DefaultRequestHeaders.Clear();
+                    client.DefaultRequestHeaders.Add("Sucursal", Sucursal);
 
-                    return apiResponse;
+                    HttpResponseMessage response = await client.GetAsync(apiUrl);
+
+                    if (response.StatusCode == HttpStatusCode.ServiceUnavailable ||
+                        response.StatusCode == HttpStatusCode.Unauthorized)
+                    {
+                        apiResponse.Success = false;
+                        apiResponse.Message = response.ReasonPhrase;
+                        return apiResponse;
+                    }
+
+                    response.EnsureSuccessStatusCode();
+
+                    apiResponse = JsonConvert.DeserializeObject<ApiResponse>(
+                        await response.Content.ReadAsStringAsync()
+                    );
                 }
-
-                apiResponse = JsonConvert.DeserializeObject<ApiResponse>(await response.Content.ReadAsStringAsync().ConfigureAwait(false));
             }
-
-            if (!response.IsSuccessStatusCode)
-                Logger.Error($"No se pudo procesar: IsOnline\n{response.StatusCode}");
+            catch (Exception ex)
+            {
+                Logger.Error($"Error consumiendo IsOnline: {ex.Message}");
+                apiResponse.Success = false;
+                apiResponse.Message = ex.Message;
+            }
 
             return apiResponse;
         }
+
+
 
         /// <summary>
         /// Obtiene Número de Versión
@@ -1486,5 +1701,11 @@ namespace SOLTEC.SPOS.Negocio.Sincronizacion
                 return false;
             }
         }
-    }  
+    }
+
+    public class ControlOnDemand
+    {
+        public DateTime? UltimaEjecucion { get; set; }
+        public TimeSpan? UltimaHora { get; set; }
+    }
 }
